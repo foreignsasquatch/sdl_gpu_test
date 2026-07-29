@@ -1,7 +1,6 @@
 // TODO: Implement better logging for the whole thing
-#include "SDL3/SDL.h"
+#include "SDL3/SDL_gpu.h"
 #include "utils.h"
-#include "HandmadeMath.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -84,13 +83,14 @@ int main() {
     }
 
     SDL_GPUPresentMode presentMode = SDL_GPU_PRESENTMODE_VSYNC;
-    SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR_LINEAR, presentMode);
+    SDL_SetGPUSwapchainParameters(device, window, SDL_GPU_SWAPCHAINCOMPOSITION_SDR, presentMode);
 
     SDL_GPUShader* vertexShader = loadShader(device, "content/shader.vert.spv", 0, 1, 0, 0);
     SDL_GPUShader* fragmentShader = loadShader(device, "content/shader.frag.spv", 1, 0, 0, 0);
 
     int imageWidth, imageHeight;
-    void* imageData = stbi_load("content/image.png", &imageWidth, &imageHeight, NULL, 4);
+    stbi_set_flip_vertically_on_load(1);
+    void* imageData = stbi_load("content/colormap.png", &imageWidth, &imageHeight, NULL, 4);
     size_t imageDataByteSize = imageWidth * imageHeight * 4;
 
     SDL_GPUTexture* texture = SDL_CreateGPUTexture(device, &(SDL_GPUTextureCreateInfo) {
@@ -103,6 +103,16 @@ int main() {
         .sample_count = 0,
     });
 
+    SDL_GPUTexture* depthTexture = SDL_CreateGPUTexture(device, &(SDL_GPUTextureCreateInfo){
+        .format = SDL_GPU_TEXTUREFORMAT_D24_UNORM,
+        .usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+        .width = 1280,
+        .height = 720,
+        .layer_count_or_depth = 1,
+        .num_levels = 1,
+        .sample_count = 0
+    });
+
     typedef struct VertexData {
         HMM_Vec3 position;
         HMM_Vec4 color;
@@ -111,17 +121,24 @@ int main() {
 
     HMM_Vec4 white = {1, 1, 1, 1};
 
-    VertexData vertices[] = {
-        {{-0.5,  0.5, 0}, white, {0, 0}},
-        {{ 0.5,  0.5, 0}, white, {1, 0}},
-        {{-0.5, -0.5, 0}, white, {0, 1}},
-        {{ 0.5, -0.5, 0}, white, {1, 1}},
-    };
+    ObjData modelData = {};
+    loadObj(&modelData, "content/character-human.obj");
 
-    Uint16 indices[] = {
-        0, 1, 2,
-        2, 1, 3
-    };
+    // TODO: Copy the data onto this array so that
+    // model data can be freed
+    // make this dynamically allocated
+    VertexData vertices[modelData.faces.used-1] = {};
+    Uint16 indices[modelData.faces.used-1] = {};
+
+    for(int i = 0; i < modelData.faces.used; i++) {
+        ObjFaceIndex face = ((ObjFaceIndex*)modelData.faces.array)[i];
+        vertices[i] = (VertexData){
+            .position = ((HMM_Vec3*)modelData.positions.array)[face.pos],
+            .color = white,
+            .uv = ((HMM_Vec2*)modelData.uvs.array)[face.uv]
+        };
+        indices[i] = i;
+    }
 
     size_t verticesByteSize = sizeof(vertices);
     size_t indicesByteSize = sizeof(indices);
@@ -240,13 +257,20 @@ int main() {
             .num_vertex_attributes = sizeof(vertexAttribs) / sizeof(vertexAttribs[0]),
             .vertex_attributes = vertexAttribs
         },
+        .depth_stencil_state = {
+            .enable_depth_test = true,
+            .compare_op = SDL_GPU_COMPAREOP_LESS,
+            .enable_depth_write = true
+        },
         .target_info = {
             .num_color_targets = 1,
             .color_target_descriptions = (SDL_GPUColorTargetDescription[]){
                 {
                     .format = SDL_GetGPUSwapchainTextureFormat(device,window)
                 }
-            }
+            },
+            .has_depth_stencil_target = true,
+            .depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D24_UNORM
         },
         .primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
     };
@@ -262,7 +286,7 @@ int main() {
     
     float rotationSpeed = 90 * HMM_DegToRad;
     float rotation = 0;
-    HMM_Mat4 projectionMatrix = HMM_Perspective_RH_NO(70 * HMM_DegToRad, aspect, 0.0001, 1000);
+    HMM_Mat4 projectionMatrix = HMM_Perspective_RH_NO(70 * HMM_DegToRad, aspect, 0.0001, 10000);
 
     SDL_Event event;
     bool isRunning = true;
@@ -291,7 +315,7 @@ int main() {
         }
 
         rotation += rotationSpeed * deltaTime;
-        HMM_Mat4 modelMatrix = HMM_MulM4(HMM_Translate((HMM_Vec3){0, 0, -2}), HMM_Rotate_RH(rotation, (HMM_Vec3){0, 1, 0}));
+        HMM_Mat4 modelMatrix = HMM_MulM4(HMM_Translate((HMM_Vec3){0, -0.5, -2}), HMM_Rotate_RH(rotation, (HMM_Vec3){0, 1, 0}));
         HMM_Mat4 mvp = HMM_MulM4(projectionMatrix, modelMatrix);
 
         if(swapchainTexture != NULL) {
@@ -300,15 +324,22 @@ int main() {
             colorTargetInfo.texture = swapchainTexture;
             colorTargetInfo.load_op = SDL_GPU_LOADOP_CLEAR;
             colorTargetInfo.store_op = SDL_GPU_STOREOP_STORE;
-           
-            SDL_GPURenderPass* renderPass = SDL_BeginGPURenderPass(commandBuffer, &colorTargetInfo, 1, NULL);
+          
+            SDL_GPUDepthStencilTargetInfo depthStencilTargetInfo = {
+                .texture = depthTexture,
+                .load_op = SDL_GPU_LOADOP_CLEAR,
+                .clear_depth = 1,
+                .store_op = SDL_GPU_STOREOP_STORE,
+            };
+
+            SDL_GPURenderPass* renderPass = SDL_BeginGPURenderPass(commandBuffer, &colorTargetInfo, 1, &depthStencilTargetInfo);
             
             SDL_BindGPUGraphicsPipeline(renderPass, pipeline);
             SDL_BindGPUVertexBuffers(renderPass, 0, &(SDL_GPUBufferBinding){.buffer = vertexBuffer, .offset = 0}, 1);
             SDL_BindGPUIndexBuffer(renderPass, &(SDL_GPUBufferBinding){.buffer = indexBuffer, .offset = 0}, SDL_GPU_INDEXELEMENTSIZE_16BIT);
             SDL_PushGPUVertexUniformData(commandBuffer, 0, &mvp.Elements, sizeof(mvp.Elements));
             SDL_BindGPUFragmentSamplers(renderPass, 0, &(SDL_GPUTextureSamplerBinding){.texture = texture, .sampler = sampler}, 1);
-            SDL_DrawGPUIndexedPrimitives(renderPass, 6, 1, 0, 0, 0);
+            SDL_DrawGPUIndexedPrimitives(renderPass, modelData.faces.used-1, 1, 0, 0, 0);
 
             SDL_EndGPURenderPass(renderPass);
         }
@@ -322,7 +353,10 @@ int main() {
     SDL_ReleaseGPUBuffer(device, vertexBuffer);
     SDL_ReleaseGPUBuffer(device, indexBuffer);
     SDL_ReleaseGPUTexture(device, texture);
+    SDL_ReleaseGPUTexture(device, depthTexture); 
     SDL_ReleaseGPUSampler(device, sampler);
+
+    unloadObj(&modelData);
 
     SDL_ReleaseWindowFromGPUDevice(device, window);
     SDL_DestroyGPUDevice(device);
