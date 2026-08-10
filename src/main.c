@@ -122,7 +122,7 @@ int main() {
     HMM_Vec4 white = {1, 1, 1, 1};
 
     ObjData modelData = {};
-    loadObj(&modelData, "content/character-human.obj");
+    loadObj(&modelData, "content/character-orc.obj");
 
     // TODO: Copy the data onto this array so that
     // model data can be freed
