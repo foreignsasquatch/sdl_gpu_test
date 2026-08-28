@@ -1,4 +1,6 @@
-// TODO: Implement better logging for the whole thing
+// TODO: Shapes drawing
+// TODO: Font loading and drawing text
+// TODO: Image loading and drawing
 #include "SDL3/SDL_gpu.h"
 #include "utils.h"
 #define STB_IMAGE_IMPLEMENTATION
